@@ -36,6 +36,7 @@ from telegram.ext import (
 from config import OBJECTS
 from docx_filler import IntroParagraphNotFound, fill_template
 from letter_writer import generate_body
+from pdf_reader import read_pdf_text
 
 load_dotenv()
 
@@ -75,18 +76,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-async def on_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not _is_allowed(update):
-        await update.message.reply_text("Извините, у вас нет доступа к этому боту.")
-        return ConversationHandler.END
-
-    text = update.message.text or update.message.caption or ""
-    if not text.strip():
-        await update.message.reply_text("Пришлите текст входящего письма.")
-        return ConversationHandler.END
-
-    context.user_data["incoming"] = text
-
+async def _present_objects(update: Update, context: ContextTypes.DEFAULT_TYPE, incoming_text: str) -> int:
+    """Сохранить текст входящего письма и показать кнопки объектов."""
+    context.user_data["incoming"] = incoming_text
     keyboard = [
         [InlineKeyboardButton(obj["title"], callback_data=key)]
         for key, obj in OBJECTS.items()
@@ -96,6 +88,49 @@ async def on_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return CHOOSING_OBJECT
+
+
+async def on_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Входящее письмо прислали текстом."""
+    if not _is_allowed(update):
+        await update.message.reply_text("Извините, у вас нет доступа к этому боту.")
+        return ConversationHandler.END
+
+    text = update.message.text or update.message.caption or ""
+    if not text.strip():
+        await update.message.reply_text("Пришлите текст входящего письма.")
+        return ConversationHandler.END
+
+    return await _present_objects(update, context, text)
+
+
+async def on_incoming_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Входящее письмо прислали PDF-файлом."""
+    if not _is_allowed(update):
+        await update.message.reply_text("Извините, у вас нет доступа к этому боту.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Читаю PDF, это может занять до минуты…")
+    try:
+        tg_file = await context.bot.get_file(update.message.document.file_id)
+        pdf_bytes = bytes(await tg_file.download_as_bytearray())
+        # Тяжёлые операции (парсинг PDF, возможный OCR через API) — в отдельном потоке,
+        # чтобы не блокировать бота.
+        text, method = await asyncio.to_thread(read_pdf_text, pdf_bytes)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Ошибка при чтении PDF")
+        await update.message.reply_text(f"Не удалось прочитать PDF: {e}")
+        return ConversationHandler.END
+
+    if not text.strip():
+        await update.message.reply_text(
+            "Не удалось извлечь текст из PDF. Пришлите письмо текстом или другим файлом."
+        )
+        return ConversationHandler.END
+
+    note = "распознал скан" if method == "ocr" else "взял текст из PDF"
+    await update.message.reply_text(f"Готово: {note}.")
+    return await _present_objects(update, context, text)
 
 
 async def on_object_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -130,7 +165,7 @@ async def on_theses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Готовлю ответ, минутку…")
 
     try:
-        body = generate_body(incoming, theses, obj)
+        body = await asyncio.to_thread(generate_body, incoming, theses, obj)
         if not body:
             await update.message.reply_text(
                 "Модель вернула пустой ответ. Попробуйте ещё раз или уточните тезисы."
@@ -204,7 +239,10 @@ def main() -> None:
     application = Application.builder().token(token).build()
 
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, on_incoming)],
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND, on_incoming),
+            MessageHandler(filters.Document.PDF, on_incoming_pdf),
+        ],
         states={
             CHOOSING_OBJECT: [CallbackQueryHandler(on_object_chosen)],
             WAITING_THESES: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_theses)],
