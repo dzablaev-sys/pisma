@@ -12,6 +12,7 @@
 не даёт бесплатному сервису уснуть.
 """
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -189,6 +190,10 @@ def _start_health_server():
 # ---------- Точка входа ----------
 
 def main() -> None:
+    # Python 3.14 больше не создаёт event loop автоматически, а python-telegram-bot
+    # ожидает его в главном потоке — создаём и назначаем явно.
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
         raise SystemExit("Не задан TELEGRAM_TOKEN (в .env или в переменных окружения Render).")
