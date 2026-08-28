@@ -1,0 +1,11 @@
+# Секреты — никогда не коммитим
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Служебное
+.DS_Store
